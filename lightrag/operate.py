@@ -95,8 +95,87 @@ def _truncate_entity_identifier(
     )
     return display_value
 
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from typing import Any, List, Dict, Optional
 
 def chunking_by_token_size(
+    tokenizer,  # ← не используется напрямую, но оставлен для совместимости сигнатуры
+    content: str,
+    split_by_character: Optional[str] = None,
+    split_by_character_only: bool = False,
+    chunk_overlap_token_size: int = 100,
+    chunk_token_size: int = 1200,
+    tiktoken_model_name: str = "gpt-4o-mini",  # ← можно передавать или захардкодить
+) -> List[Dict[str, Any]]:
+    """
+    Умная разбивка текста на чанки по токенам с сохранением семантических границ.
+    """
+
+    # Создаём умный сплиттер на основе tiktoken
+    text_splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
+        model_name=tiktoken_model_name,
+        chunk_size=chunk_token_size,
+        chunk_overlap=chunk_overlap_token_size,
+    )
+
+    results: List[Dict[str, Any]] = []
+
+    if split_by_character:
+        raw_chunks = content.split(split_by_character)
+        processed_chunks = []
+
+        for chunk in raw_chunks:
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+
+            if split_by_character_only:
+                # Проверяем, умещается ли чанк в лимит
+                approx_tokens = text_splitter._length_function(chunk)
+                if approx_tokens > chunk_token_size:
+                    logger.warning(
+                        "Chunk split_by_character exceeds token limit: len=%d limit=%d",
+                        approx_tokens,
+                        chunk_token_size,
+                    )
+                    raise ChunkTokenLimitExceededError(
+                        chunk_tokens=approx_tokens,
+                        chunk_token_limit=chunk_token_size,
+                        chunk_preview=chunk[:120],
+                    )
+                processed_chunks.append(chunk)
+            else:
+                # Разбиваем каждый подчанк умно, если он слишком большой
+                if text_splitter._length_function(chunk) <= chunk_token_size:
+                    processed_chunks.append(chunk)
+                else:
+                    sub_chunks = text_splitter.split_text(chunk)
+                    processed_chunks.extend(sub_chunks)
+
+        # Формируем результат
+        for idx, chunk in enumerate(processed_chunks):
+            token_count = text_splitter._length_function(chunk)
+            results.append({
+                "tokens": token_count,
+                "content": chunk.strip(),
+                "chunk_order_index": idx,
+            })
+
+    else:
+        # Полностью умная разбивка всего текста
+        chunks = text_splitter.split_text(content)
+        for idx, chunk in enumerate(chunks):
+            token_count = text_splitter._length_function(chunk)
+            results.append({
+                "tokens": token_count,
+                "content": chunk.strip(),
+                "chunk_order_index": idx,
+            })
+
+    return results
+
+
+def chunking_by_token_size_old(
     tokenizer: Tokenizer,
     content: str,
     split_by_character: str | None = None,
@@ -365,12 +444,12 @@ async def _summarize_descriptions(
     if embedding_token_limit is not None and summary:
         tokenizer = global_config["tokenizer"]
         summary_token_count = len(tokenizer.encode(summary))
-        threshold = int(embedding_token_limit)
+        threshold = int(embedding_token_limit * 0.9)
 
         if summary_token_count > threshold:
             logger.warning(
-                f"Summary tokens({summary_token_count}) exceeds embedding_token_limit({embedding_token_limit}) "
-                f" for {description_type}: {description_name}"
+                f"Summary tokens ({summary_token_count}) exceeds 90% of embedding limit "
+                f"({embedding_token_limit}) for {description_type}: {description_name}"
             )
 
     return summary
@@ -2832,11 +2911,9 @@ async def extract_entities(
         cache_keys_collector = []
 
         # Get initial extraction
-        # Format system prompt without input_text for each chunk (enables OpenAI prompt caching across chunks)
         entity_extraction_system_prompt = PROMPTS[
             "entity_extraction_system_prompt"
-        ].format(**context_base)
-        # Format user prompts with input_text for each chunk
+        ].format(**{**context_base, "input_text": content})
         entity_extraction_user_prompt = PROMPTS["entity_extraction_user_prompt"].format(
             **{**context_base, "input_text": content}
         )
@@ -3266,16 +3343,10 @@ async def extract_keywords_only(
     It ONLY extracts keywords (hl_keywords, ll_keywords).
     """
 
-    # 1. Build the examples
-    examples = "\n".join(PROMPTS["keywords_extraction_examples"])
-
-    language = global_config["addon_params"].get("language", DEFAULT_SUMMARY_LANGUAGE)
-
-    # 2. Handle cache if needed - add cache type for keywords
+    # 1. Handle cache if needed - add cache type for keywords
     args_hash = compute_args_hash(
         param.mode,
         text,
-        language,
     )
     cached_result = await handle_cache(
         hashing_kv, args_hash, text, param.mode, cache_type="keywords"
@@ -3291,6 +3362,11 @@ async def extract_keywords_only(
             logger.warning(
                 "Invalid cache format for keywords, proceeding with extraction"
             )
+
+    # 2. Build the examples
+    examples = "\n".join(PROMPTS["keywords_extraction_examples"])
+
+    language = global_config["addon_params"].get("language", DEFAULT_SUMMARY_LANGUAGE)
 
     # 3. Build the keyword-extraction prompt
     kw_prompt = PROMPTS["keywords_extraction"].format(

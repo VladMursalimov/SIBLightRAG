@@ -19,6 +19,63 @@ from dotenv import load_dotenv
 load_dotenv(dotenv_path=".env", override=False)
 
 
+import torch
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+from typing import List, Optional, Dict, Any
+import numpy as np
+
+# ---- Глобальная инициализация модели (вне функций) ----
+# _device = "cuda" if torch.cuda.is_available() else "cpu"
+_device = "cuda"
+logger.info(f"device: {_device}" )
+
+_tokenizer = AutoTokenizer.from_pretrained("qilowoq/bge-reranker-v2-m3-en-ru")
+_model = AutoModelForSequenceClassification.from_pretrained("qilowoq/bge-reranker-v2-m3-en-ru")
+_model.to(_device)
+_model.eval()
+
+
+async def hf_rerank_func(
+    query: str,
+    documents: List[str],
+    top_n: Optional[int] = None,
+    extra_body: Optional[Dict[str, Any]] = None,  # kept for interface compatibility
+    **kwargs
+):
+    """
+    Local Hugging Face reranker using bge-reranker-v2-m3-en-ru
+    """
+    if not documents:
+        return []
+
+
+    # Prepare pairs
+    pairs = [[query, doc] for doc in documents]
+
+    with torch.no_grad():
+        inputs = _tokenizer(
+            pairs,
+            padding=True,
+            truncation=True,
+            return_tensors="pt",
+            max_length=512,
+        ).to(_device)
+
+        scores = _model(**inputs, return_dict=True).logits.view(-1,).float()
+        scores = scores.cpu().numpy()
+
+    # Sort by score descending
+    indices = np.argsort(scores)[::-1]
+    if top_n is not None:
+        indices = indices[:top_n]
+
+    # Return list of dicts like: [{"index": i, "relevance_score": s}]
+    results = [
+        {"index": int(idx), "relevance_score": float(scores[idx])}
+        for idx in indices
+    ]
+    return results
+
 def chunk_documents_for_rerank(
     documents: List[str],
     max_tokens: int = 480,

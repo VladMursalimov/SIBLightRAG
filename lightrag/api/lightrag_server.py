@@ -81,6 +81,10 @@ config.read("config.ini")
 auth_configured = bool(auth_handler.accounts)
 
 
+
+
+
+
 class LLMConfigCache:
     """Smart LLM and Embedding configuration cache class"""
 
@@ -868,7 +872,6 @@ def create_app(args):
             func=optimized_embedding_function,
             max_token_size=final_max_token_size,
             send_dimensions=False,  # Will be set later based on binding requirements
-            model_name=model,
         )
 
         # Log final embedding configuration
@@ -966,20 +969,19 @@ def create_app(args):
             f"Embedding max_token_size: {embedding_func.max_token_size} (from {source})"
         )
     else:
-        logger.info(
-            "Embedding max_token_size: None (Embedding token limit is disabled)."
-        )
+        logger.info("Embedding max_token_size: not set (90% token warning disabled)")
 
     # Configure rerank function based on args.rerank_bindingparameter
     rerank_model_func = None
     if args.rerank_binding != "null":
-        from lightrag.rerank import cohere_rerank, jina_rerank, ali_rerank
+        from lightrag.rerank import cohere_rerank, jina_rerank, ali_rerank, hf_rerank_func
 
         # Map rerank binding to corresponding function
         rerank_functions = {
             "cohere": cohere_rerank,
             "jina": jina_rerank,
             "aliyun": ali_rerank,
+            "hf": hf_rerank_func,
         }
 
         # Select the appropriate rerank function based on binding
@@ -1043,7 +1045,7 @@ def create_app(args):
     ollama_server_infos = OllamaServerInfos(
         name=args.simulated_model_name, tag=args.simulated_model_tag
     )
-
+    logger.info(f"ARGS: {args}")
     # Initialize RAG with unified configuration
     try:
         rag = LightRAG(
